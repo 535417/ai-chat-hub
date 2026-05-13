@@ -135,7 +135,7 @@ async function readSseStream(response, onEvent, signal) {
 }
 
 async function streamChat(message, signal) {
-  const response = await fetch('/api/chat/stream', {
+  const response = await fetch('/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message }),
