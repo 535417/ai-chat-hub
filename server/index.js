@@ -9,10 +9,54 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.join(__dirname, '..');
 
+const PROVIDERS = ['deepseek', 'mimo', 'glm'];
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(rootDir, 'public')));
+
+// ── Rate Limiting (in-memory, per IP) ──────────────────────────────────
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 20;
+const rateLimitStore = new Map();
+
+// Periodic cleanup to avoid memory leak
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of rateLimitStore) {
+    if (now > entry.resetTime) rateLimitStore.delete(key);
+  }
+}, RATE_LIMIT_WINDOW_MS);
+
+function rateLimitMiddleware(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  let entry = rateLimitStore.get(ip);
+
+  if (!entry || now > entry.resetTime) {
+    entry = { count: 0, resetTime: now + RATE_LIMIT_WINDOW_MS };
+    rateLimitStore.set(ip, entry);
+  }
+
+  entry.count++;
+  const remaining = Math.max(0, RATE_LIMIT_MAX - entry.count);
+  res.setHeader('X-RateLimit-Limit', RATE_LIMIT_MAX);
+  res.setHeader('X-RateLimit-Remaining', remaining);
+  res.setHeader('X-RateLimit-Reset', Math.ceil(entry.resetTime / 1000));
+
+  if (entry.count > RATE_LIMIT_MAX) {
+    const retryAfter = Math.ceil((entry.resetTime - now) / 1000);
+    res.setHeader('Retry-After', retryAfter);
+    res.status(429).json({ error: '请求过于频繁，请稍后再试' });
+    return;
+  }
+
+  next();
+}
+
+// ── Upstream timeout ───────────────────────────────────────────────────
+const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS) || 60_000;
 
 function joinChatCompletionsUrl(baseUrl) {
   const trimmed = String(baseUrl || '').replace(/\/+$/, '');
@@ -100,6 +144,7 @@ async function streamProvider({
   messages,
   signal,
   writeSse,
+  timeoutMs,
 }) {
   const trimmedBase = String(baseUrl || '').trim();
   if (!trimmedBase) {
@@ -136,70 +181,97 @@ async function streamProvider({
     return;
   }
 
-  let response;
-  try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        stream: true,
-      }),
-      signal,
-    });
-  } catch (err) {
-    await writeSse(label, {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    await writeSse(label, { done: true });
-    return;
-  }
+  // Merge client abort + upstream timeout into one signal
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => timeoutController.abort(), timeoutMs);
+  const mergedSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
 
-  if (!response.ok || !response.body) {
-    const text = await response.text().catch(() => '');
-    let detail = text || response.statusText;
-    if (
-      response.status === 404 &&
-      /NOT_FOUND/i.test(text) &&
-      (/sin1::/i.test(text) || /vercel/i.test(text))
-    ) {
-      detail = `${detail.trim()} (${baseUrlEnvKey(label)} likely points to the wrong host — e.g. your *.vercel.app URL instead of the provider API.)`;
-    }
-    await writeSse(label, {
-      error: `HTTP ${response.status}: ${detail}`,
-    });
-    await writeSse(label, { done: true });
-    return;
-  }
+  const isTimeout = () => timeoutController.signal.aborted && !signal?.aborted;
 
   try {
-    for await (const part of iterateOpenAIChatStream(response.body, signal)) {
-      if (part.type === 'content' || part.type === 'reasoning') {
-        await writeSse(label, { delta: part.text, kind: part.type });
-      }
-    }
-  } catch (err) {
-    if (signal?.aborted) {
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages,
+          stream: true,
+        }),
+        signal: mergedSignal,
+      });
+    } catch (err) {
+      await writeSse(label, {
+        error: isTimeout()
+          ? `请求超时（${Math.round(timeoutMs / 1000)}秒）`
+          : err instanceof Error ? err.message : String(err),
+      });
       await writeSse(label, { done: true });
       return;
     }
-    await writeSse(label, {
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
 
-  await writeSse(label, { done: true });
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => '');
+      let detail = text || response.statusText;
+      if (
+        response.status === 404 &&
+        /NOT_FOUND/i.test(text) &&
+        (/sin1::/i.test(text) || /vercel/i.test(text))
+      ) {
+        detail = `${detail.trim()} (${baseUrlEnvKey(label)} likely points to the wrong host — e.g. your *.vercel.app URL instead of the provider API.)`;
+      }
+      await writeSse(label, {
+        error: `HTTP ${response.status}: ${detail}`,
+      });
+      await writeSse(label, { done: true });
+      return;
+    }
+
+    try {
+      for await (const part of iterateOpenAIChatStream(response.body, mergedSignal)) {
+        if (part.type === 'content' || part.type === 'reasoning') {
+          await writeSse(label, { delta: part.text, kind: part.type });
+        }
+      }
+    } catch (err) {
+      if (signal?.aborted) {
+        await writeSse(label, { done: true });
+        return;
+      }
+      await writeSse(label, {
+        error: isTimeout()
+          ? `请求超时（${Math.round(timeoutMs / 1000)}秒）`
+          : err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    await writeSse(label, { done: true });
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
-app.post('/api/chat/stream', async (req, res) => {
-  const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
-  if (!message) {
-    res.status(400).json({ error: 'message is required' });
-    return;
+app.post('/api/chat/stream', rateLimitMiddleware, async (req, res) => {
+  // Accept: `providerMessages` (per-provider), `messages` (shared), or legacy `message` string
+  let providerMessages;
+  if (req.body?.providerMessages && typeof req.body.providerMessages === 'object') {
+    providerMessages = req.body.providerMessages;
+  } else if (Array.isArray(req.body?.messages) && req.body.messages.length > 0) {
+    providerMessages = Object.fromEntries(PROVIDERS.map(p => [p, req.body.messages]));
+  } else {
+    const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
+    if (!message) {
+      res.status(400).json({ error: 'message, messages, or providerMessages is required' });
+      return;
+    }
+    const single = [{ role: 'user', content: message }];
+    providerMessages = Object.fromEntries(PROVIDERS.map(p => [p, single]));
   }
 
   res.status(200);
@@ -225,37 +297,20 @@ app.post('/api/chat/stream', async (req, res) => {
 
   const { writeSse, wait } = createWriteQueue(res);
 
-  const messages = [{ role: 'user', content: message }];
-
-  const deepseek = {
-    label: 'deepseek',
-    baseUrl: process.env.DEEPSEEK_BASE_URL,
-    apiKey: process.env.DEEPSEEK_API_KEY,
-    model: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
-    messages,
+  const makeProvider = (label, envSuffix, defaultModel) => ({
+    label,
+    baseUrl: process.env[`${envSuffix}_BASE_URL`],
+    apiKey: process.env[`${envSuffix}_API_KEY`],
+    model: process.env[`${envSuffix}_MODEL`] || defaultModel,
+    messages: providerMessages[label] || providerMessages.deepseek || [{ role: 'user', content: '' }],
     signal,
     writeSse,
-  };
+    timeoutMs: UPSTREAM_TIMEOUT_MS,
+  });
 
-  const mimo = {
-    label: 'mimo',
-    baseUrl: process.env.MIMO_BASE_URL,
-    apiKey: process.env.MIMO_API_KEY,
-    model: process.env.MIMO_MODEL || 'mimo-v2-flash',
-    messages,
-    signal,
-    writeSse,
-  };
-
-  const glm = {
-    label: 'glm',
-    baseUrl: process.env.GLM_BASE_URL,
-    apiKey: process.env.GLM_API_KEY,
-    model: process.env.GLM_MODEL || 'glm-4-flash',
-    messages,
-    signal,
-    writeSse,
-  };
+  const deepseek = makeProvider('deepseek', 'DEEPSEEK', 'deepseek-chat');
+  const mimo = makeProvider('mimo', 'MIMO', 'mimo-v2-flash');
+  const glm = makeProvider('glm', 'GLM', 'glm-4-flash');
 
   try {
     await Promise.all([streamProvider(deepseek), streamProvider(mimo), streamProvider(glm)]);

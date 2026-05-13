@@ -1,5 +1,13 @@
 const PROVIDERS = ['deepseek', 'mimo', 'glm'];
 
+// ── Conversation state ─────────────────────────────────────────────────
+// userMessages: [{ content, timestamp }]
+// providerResponses: { deepseek: [{ content, timestamp }], ... }
+const conversation = {
+  userMessages: [],
+  providerResponses: Object.fromEntries(PROVIDERS.map(p => [p, []])),
+};
+
 function $(selector, root = document) {
   return root.querySelector(selector);
 }
@@ -14,21 +22,68 @@ function getPanel(provider) {
   if (!panel) return null;
   return {
     panel,
+    messages: panel.querySelector('[data-role="messages"]'),
     output: panel.querySelector('[data-role="output"]'),
     state: panel.querySelector('[data-role="state"]'),
   };
 }
 
-function resetPanels() {
-  for (const p of PROVIDERS) {
-    const ui = getPanel(p);
-    if (!ui) continue;
-    ui.output.textContent = '';
-    ui.state.textContent = '未发送';
-    ui.state.classList.remove('is-streaming', 'is-done', 'is-error');
+// ── Build messages array for API request ───────────────────────────────
+function buildMessagesForProvider(provider) {
+  const msgs = [];
+  const responses = conversation.providerResponses[provider];
+  for (let i = 0; i < conversation.userMessages.length; i++) {
+    msgs.push({ role: 'user', content: conversation.userMessages[i].content });
+    if (responses[i]) {
+      msgs.push({ role: 'assistant', content: responses[i].content });
+    }
   }
+  return msgs;
 }
 
+// ── Render conversation history in a panel ─────────────────────────────
+function renderMessages(provider) {
+  const ui = getPanel(provider);
+  if (!ui) return;
+  const container = ui.messages;
+  container.innerHTML = '';
+
+  const responses = conversation.providerResponses[provider];
+
+  for (let i = 0; i < conversation.userMessages.length; i++) {
+    // User message
+    const userDiv = document.createElement('div');
+    userDiv.className = 'msg msg--user';
+    userDiv.innerHTML = `<span class="msg__role">你</span><div class="msg__text">${escapeHtml(conversation.userMessages[i].content)}</div>`;
+    container.appendChild(userDiv);
+
+    // Assistant response (may not exist yet for the latest turn)
+    if (responses[i]) {
+      const asstDiv = document.createElement('div');
+      asstDiv.className = 'msg msg--assistant';
+      asstDiv.innerHTML = `<span class="msg__role">${providerLabel(provider)}</span><div class="msg__text">${escapeHtml(responses[i].content)}</div>`;
+      container.appendChild(asstDiv);
+    }
+  }
+
+  // Scroll to bottom
+  container.scrollTop = container.scrollHeight;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function providerLabel(provider) {
+  if (provider === 'deepseek') return 'DeepSeek';
+  if (provider === 'mimo') return 'MiMo';
+  if (provider === 'glm') return 'GLM';
+  return provider;
+}
+
+// ── Panel state management ─────────────────────────────────────────────
 function setPanelState(provider, mode) {
   const ui = getPanel(provider);
   if (!ui) return;
@@ -47,24 +102,66 @@ function setPanelState(provider, mode) {
   }
 }
 
+function resetPanels() {
+  for (const p of PROVIDERS) {
+    const ui = getPanel(p);
+    if (!ui) continue;
+    ui.messages.innerHTML = '';
+    ui.output.textContent = '';
+    ui.output.hidden = true;
+    ui.messages.hidden = false;
+    ui.state.textContent = '未发送';
+    ui.state.classList.remove('is-streaming', 'is-done', 'is-error');
+  }
+}
+
+// ── Streaming output (for current turn) ───────────────────────────────
+// During streaming, we show the live output in the output element,
+// then move it to the messages container when done.
+const liveBuffers = Object.fromEntries(PROVIDERS.map(p => [p, '']));
+
+function startLiveOutput(provider) {
+  liveBuffers[provider] = '';
+  const ui = getPanel(provider);
+  if (!ui) return;
+  ui.output.textContent = '';
+  ui.output.hidden = false;
+}
+
 function appendDelta(provider, text) {
+  liveBuffers[provider] += text;
   const ui = getPanel(provider);
   if (!ui) return;
   ui.output.textContent += text;
+  // Auto-scroll
+  ui.output.scrollTop = ui.output.scrollHeight;
+}
+
+function finalizeLiveOutput(provider) {
+  const content = liveBuffers[provider];
+  const ui = getPanel(provider);
+  if (ui) {
+    ui.output.hidden = true;
+  }
+
+  if (content) {
+    conversation.providerResponses[provider].push({ content, timestamp: Date.now() });
+  }
+  liveBuffers[provider] = '';
+  renderMessages(provider);
 }
 
 function showError(provider, message) {
   const ui = getPanel(provider);
   if (!ui) return;
+  // Show error in the output area, then finalize
   const prefix = ui.output.textContent ? `${ui.output.textContent}\n\n` : '';
   ui.output.textContent = `${prefix}[错误] ${message}`;
+  ui.output.hidden = false;
   setPanelState(provider, 'error');
 }
 
-/**
- * Parse SSE frames from a fetch streaming body.
- * Calls onEvent({ event, data }) for each completed frame.
- */
+// ── SSE parsing ────────────────────────────────────────────────────────
 function takeNextSseFrame(buffer) {
   const crlf = buffer.indexOf('\r\n\r\n');
   const lf = buffer.indexOf('\n\n');
@@ -134,11 +231,12 @@ async function readSseStream(response, onEvent, signal) {
   }
 }
 
-async function streamChat(message, signal) {
+// ── Main streaming request ─────────────────────────────────────────────
+async function streamChat(providerMessages, signal) {
   const response = await fetch('/api/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ providerMessages }),
     signal,
   });
 
@@ -152,13 +250,8 @@ async function streamChat(message, signal) {
   await readSseStream(
     response,
     ({ event, data }) => {
-      if (event === 'all') {
-        return;
-      }
-
-      if (!PROVIDERS.includes(event)) {
-        return;
-      }
+      if (event === 'all') return;
+      if (!PROVIDERS.includes(event)) return;
 
       if (data?.error) {
         showError(event, String(data.error));
@@ -178,6 +271,7 @@ async function streamChat(message, signal) {
         if (!hasErrorClass) {
           setPanelState(event, 'done');
         }
+        finalizeLiveOutput(event);
       }
     },
     signal,
@@ -190,10 +284,12 @@ async function streamChat(message, signal) {
       if (ui && !hasErrorClass) {
         setPanelState(p, 'done');
       }
+      finalizeLiveOutput(p);
     }
   }
 }
 
+// ── UI wiring ──────────────────────────────────────────────────────────
 function wireUi() {
   const form = $('#chat-form');
   const input = $('#message-input');
@@ -204,8 +300,8 @@ function wireUi() {
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const message = input.value.trim();
-    if (!message) return;
+    const text = input.value.trim();
+    if (!text) return;
 
     if (activeController) {
       activeController.abort();
@@ -214,13 +310,29 @@ function wireUi() {
     activeController = new AbortController();
     const { signal } = activeController;
 
+    // Add user message to history
+    conversation.userMessages.push({ content: text, timestamp: Date.now() });
+    input.value = '';
+
     sendBtn.disabled = true;
     setStatus('请求中…（三个模型并行流式输出）');
+
+    // Reset panels and render existing history
     resetPanels();
-    for (const p of PROVIDERS) setPanelState(p, 'streaming');
+    for (const p of PROVIDERS) {
+      renderMessages(p);
+      startLiveOutput(p);
+      setPanelState(p, 'streaming');
+    }
+
+    // Build per-provider messages arrays
+    const providerMessages = {};
+    for (const p of PROVIDERS) {
+      providerMessages[p] = buildMessagesForProvider(p);
+    }
 
     try {
-      await streamChat(message, signal);
+      await streamChat(providerMessages, signal);
       setStatus('完成');
     } catch (err) {
       if (signal.aborted) {
@@ -244,6 +356,10 @@ function wireUi() {
     if (activeController) {
       activeController.abort();
       activeController = null;
+    }
+    conversation.userMessages = [];
+    for (const p of PROVIDERS) {
+      conversation.providerResponses[p] = [];
     }
     resetPanels();
     setStatus('就绪');

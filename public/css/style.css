@@ -242,6 +242,59 @@ body {
   color: var(--text);
 }
 
+.panel__messages {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 240px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.msg {
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.msg__role {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 4px;
+  opacity: 0.7;
+}
+
+.msg__text {
+  white-space: pre-wrap;
+}
+
+.msg--user {
+  align-self: flex-end;
+  max-width: 85%;
+  background: rgba(91, 140, 255, 0.15);
+  border: 1px solid rgba(91, 140, 255, 0.25);
+}
+
+.msg--user .msg__role {
+  color: var(--accent);
+}
+
+.msg--assistant {
+  align-self: flex-start;
+  max-width: 95%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.msg--assistant .msg__role {
+  color: var(--accent-2);
+}
+
 .footer {
   color: var(--muted);
   font-size: 12px;
