@@ -25,6 +25,45 @@ function joinChatCompletionsUrl(baseUrl) {
   return `${trimmed}/chat/completions`;
 }
 
+function baseUrlEnvKey(label) {
+  if (label === 'deepseek') return 'DEEPSEEK_BASE_URL';
+  if (label === 'mimo') return 'MIMO_BASE_URL';
+  if (label === 'glm') return 'GLM_BASE_URL';
+  return `${label.toUpperCase()}_BASE_URL`;
+}
+
+/** @returns {string | null} */
+function describeMisconfiguredBaseUrl(label, baseTrimmed) {
+  let parsed;
+  try {
+    const withProto = /^https?:\/\//i.test(baseTrimmed) ? baseTrimmed : `https://${baseTrimmed}`;
+    parsed = new URL(withProto);
+  } catch {
+    return `${label}: ${baseUrlEnvKey(label)} is not a valid URL (${baseTrimmed}).`;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (host.endsWith('vercel.app') || host.endsWith('now.sh')) {
+    const key = baseUrlEnvKey(label);
+    return `${label}: ${key} points to ${parsed.host}. That is your deployment host, not the model API. Set ${key} to the provider's real API base (e.g. DeepSeek: https://api.deepseek.com/v1).`;
+  }
+
+  return null;
+}
+
+/** @returns {string | null} */
+function describeDeepSeekPathIfWrong(fullUrl) {
+  try {
+    const u = new URL(fullUrl);
+    if (u.hostname.toLowerCase() === 'api.deepseek.com' && !u.pathname.startsWith('/v1/')) {
+      return 'DeepSeek: DEEPSEEK_BASE_URL must include /v1 (example: https://api.deepseek.com/v1). Otherwise requests hit the wrong path and can 404.';
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function createWriteQueue(res) {
   let chain = Promise.resolve();
 
@@ -70,7 +109,23 @@ async function streamProvider({
     return;
   }
 
+  const misconfigured = describeMisconfiguredBaseUrl(label, trimmedBase);
+  if (misconfigured) {
+    await writeSse(label, { error: misconfigured });
+    await writeSse(label, { done: true });
+    return;
+  }
+
   const url = joinChatCompletionsUrl(trimmedBase);
+
+  if (label === 'deepseek') {
+    const deepseekHint = describeDeepSeekPathIfWrong(url);
+    if (deepseekHint) {
+      await writeSse(label, { error: deepseekHint });
+      await writeSse(label, { done: true });
+      return;
+    }
+  }
 
   if (!apiKey) {
     await writeSse(label, {
@@ -105,8 +160,16 @@ async function streamProvider({
 
   if (!response.ok || !response.body) {
     const text = await response.text().catch(() => '');
+    let detail = text || response.statusText;
+    if (
+      response.status === 404 &&
+      /NOT_FOUND/i.test(text) &&
+      (/sin1::/i.test(text) || /vercel/i.test(text))
+    ) {
+      detail = `${detail.trim()} (${baseUrlEnvKey(label)} likely points to the wrong host — e.g. your *.vercel.app URL instead of the provider API.)`;
+    }
     await writeSse(label, {
-      error: `HTTP ${response.status}: ${text || response.statusText}`,
+      error: `HTTP ${response.status}: ${detail}`,
     });
     await writeSse(label, { done: true });
     return;
