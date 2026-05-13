@@ -203,6 +203,7 @@ async function streamProvider({
           model,
           messages,
           stream: true,
+          max_tokens: 4096,
         }),
         signal: mergedSignal,
       });
@@ -235,7 +236,7 @@ async function streamProvider({
 
     try {
       for await (const part of iterateOpenAIChatStream(response.body, mergedSignal)) {
-        if (part.type === 'content' || part.type === 'reasoning') {
+        if (part.type === 'content') {
           await writeSse(label, { delta: part.text, kind: part.type });
         }
       }
