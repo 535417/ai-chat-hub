@@ -213,7 +213,12 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-const port = Number(process.env.PORT) || 3000;
-app.listen(port, () => {
-  console.log(`Server listening on http://localhost:${port}`);
-});
+export default app;
+
+// Vercel 注入 VERCEL=1；在平台上由 server.js 导入本模块，不能 listen 占用端口。
+if (!process.env.VERCEL) {
+  const port = Number(process.env.PORT) || 3000;
+  app.listen(port, () => {
+    console.log(`Server listening on http://localhost:${port}`);
+  });
+}
