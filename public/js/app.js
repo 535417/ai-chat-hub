@@ -24,7 +24,7 @@ function resetPanels() {
     const ui = getPanel(p);
     if (!ui) continue;
     ui.output.textContent = '';
-    ui.state.textContent = '等待中';
+    ui.state.textContent = '未发送';
     ui.state.classList.remove('is-streaming', 'is-done', 'is-error');
   }
 }
@@ -43,7 +43,7 @@ function setPanelState(provider, mode) {
     ui.state.textContent = '出错';
     ui.state.classList.add('is-error');
   } else {
-    ui.state.textContent = '等待中';
+    ui.state.textContent = '未发送';
   }
 }
 
@@ -65,6 +65,25 @@ function showError(provider, message) {
  * Parse SSE frames from a fetch streaming body.
  * Calls onEvent({ event, data }) for each completed frame.
  */
+function takeNextSseFrame(buffer) {
+  const crlf = buffer.indexOf('\r\n\r\n');
+  const lf = buffer.indexOf('\n\n');
+  let sep = -1;
+  let sepLen = 0;
+  if (crlf !== -1 && (lf === -1 || crlf <= lf)) {
+    sep = crlf;
+    sepLen = 4;
+  } else if (lf !== -1) {
+    sep = lf;
+    sepLen = 2;
+  }
+  if (sep === -1) return null;
+  return {
+    frame: buffer.slice(0, sep),
+    rest: buffer.slice(sep + sepLen),
+  };
+}
+
 async function readSseStream(response, onEvent, signal) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -82,17 +101,16 @@ async function readSseStream(response, onEvent, signal) {
     buffer += decoder.decode(value, { stream: true });
 
     while (true) {
-      const sep = buffer.indexOf('\n\n');
-      if (sep === -1) break;
-
-      const rawFrame = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
+      const next = takeNextSseFrame(buffer);
+      if (!next) break;
+      const rawFrame = next.frame;
+      buffer = next.rest;
 
       let eventName = 'message';
       const dataLines = [];
 
-      for (const line of rawFrame.split('\n')) {
-        const trimmed = line.replace(/\r$/, '');
+      for (const line of rawFrame.split(/\r?\n/)) {
+        const trimmed = line.replace(/\r$/, '').trimEnd();
         if (!trimmed || trimmed.startsWith(':')) continue;
         if (trimmed.startsWith('event:')) {
           eventName = trimmed.slice('event:'.length).trim();
@@ -239,4 +257,8 @@ function wireUi() {
   });
 }
 
-document.addEventListener('DOMContentLoaded', wireUi);
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', wireUi, { once: true });
+} else {
+  wireUi();
+}

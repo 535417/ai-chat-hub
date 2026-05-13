@@ -69,7 +69,8 @@ function createWriteQueue(res) {
 
   const writeSse = (eventName, dataObj) => {
     const data = JSON.stringify(dataObj);
-    const frame = `event: ${eventName}\ndata: ${data}\n\n`;
+    // SSE: CRLF line endings + blank line terminator (better proxy / browser compatibility).
+    const frame = [`event: ${eventName}`, `data: ${data}`, '', ''].join('\r\n');
 
     chain = chain.then(
       () =>
@@ -205,6 +206,7 @@ app.post('/api/chat/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
   res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
   if (typeof res.flushHeaders === 'function') {
     res.flushHeaders();
   }
