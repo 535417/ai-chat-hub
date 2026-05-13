@@ -195,9 +195,7 @@ async function streamProvider({
   await writeSse(label, { done: true });
 }
 
-// 使用 /chat/stream 而不是 /api/*：Vercel 会把 /api 前缀留给 api/ 目录下的函数，
-// /api/chat/stream 不会进入本 Express 应用，会返回 404 NOT_FOUND。
-app.post('/chat/stream', async (req, res) => {
+app.post('/api/chat/stream', async (req, res) => {
   const message = typeof req.body?.message === 'string' ? req.body.message.trim() : '';
   if (!message) {
     res.status(400).json({ error: 'message is required' });
@@ -276,7 +274,7 @@ app.post('/chat/stream', async (req, res) => {
   }
 });
 
-app.get('/health', (_req, res) => {
+app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
