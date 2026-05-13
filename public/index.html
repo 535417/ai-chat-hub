@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>三模型对比聊天</title>
+    <link rel="stylesheet" href="/css/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div class="header__title">
+          <h1>三模型对比</h1>
+          <p class="header__subtitle">DeepSeek · MiMo · 智谱 GLM（流式输出）</p>
+        </div>
+        <div class="header__status" id="status" aria-live="polite">就绪</div>
+      </header>
+
+      <main class="main">
+        <section class="composer" aria-label="提问区域">
+          <form id="chat-form" class="composer__form">
+            <label class="sr-only" for="message-input">你的问题</label>
+            <textarea
+              id="message-input"
+              class="composer__input"
+              rows="3"
+              maxlength="8000"
+              placeholder="输入你的问题，回车发送（Shift+Enter 换行）"
+              required
+            ></textarea>
+            <div class="composer__actions">
+              <button type="button" class="button button--ghost" id="clear-btn">清空输出</button>
+              <button type="submit" class="button button--primary" id="send-btn">发送并对比</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="panels" aria-label="模型输出">
+          <article class="panel" data-provider="deepseek">
+            <div class="panel__head">
+              <h2 class="panel__title">DeepSeek</h2>
+              <span class="panel__badge" data-role="state">等待中</span>
+            </div>
+            <div class="panel__body">
+              <pre class="panel__output" data-role="output" tabindex="0"></pre>
+            </div>
+          </article>
+
+          <article class="panel" data-provider="mimo">
+            <div class="panel__head">
+              <h2 class="panel__title">MiMo</h2>
+              <span class="panel__badge" data-role="state">等待中</span>
+            </div>
+            <div class="panel__body">
+              <pre class="panel__output" data-role="output" tabindex="0"></pre>
+            </div>
+          </article>
+
+          <article class="panel" data-provider="glm">
+            <div class="panel__head">
+              <h2 class="panel__title">智谱 GLM</h2>
+              <span class="panel__badge" data-role="state">等待中</span>
+            </div>
+            <div class="panel__body">
+              <pre class="panel__output" data-role="output" tabindex="0"></pre>
+            </div>
+          </article>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <span>后端读取 <code>.env</code> 中的 Base URL 与 API Key；请勿把密钥提交到仓库。</span>
+      </footer>
+    </div>
+
+    <script src="/js/app.js" defer></script>
+  </body>
+</html>
